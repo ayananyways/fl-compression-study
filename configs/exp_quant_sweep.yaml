@@ -1,0 +1,4 @@
+experiment_id: "quant_sweep"
+compressor: "quantization"
+bit_widths: [1, 2, 4, 8, 16]
+output_path: "./results/quant_sweep.csv"

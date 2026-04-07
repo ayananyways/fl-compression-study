@@ -1,0 +1,4 @@
+experiment_id: "scale_sweep"
+compressor: "none"
+world_sizes: [2, 4, 8]
+output_path: "./results/scale_sweep.csv"

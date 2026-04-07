@@ -1,0 +1,3 @@
+experiment_id: "baseline_fp32"
+compressor: "none"
+output_path: "./results/baseline_fp32.csv"

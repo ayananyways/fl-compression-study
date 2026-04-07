@@ -1,0 +1,4 @@
+experiment_id: "sz_sweep"
+compressor: "sz"
+error_bounds: [0.1, 0.01, 0.001, 0.0001]
+output_path: "./results/sz_sweep.csv"

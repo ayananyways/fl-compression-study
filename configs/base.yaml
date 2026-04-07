@@ -1,0 +1,13 @@
+seed: 42
+world_size: 4
+backend: "gloo"
+batch_size: 64
+local_steps: 5
+total_rounds: 50
+learning_rate: 0.01
+momentum: 0.9
+weight_decay: 0.0001
+num_workers: 2
+data_split: "iid"
+dataset: "tiny_imagenet"
+data_dir: "./data/tiny-imagenet-200"

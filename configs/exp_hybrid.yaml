@@ -1,0 +1,5 @@
+experiment_id: "hybrid_sweep"
+compressor: "hybrid"
+bits: 8
+error_bounds: [0.1, 0.01]
+output_path: "./results/hybrid_sweep.csv"
