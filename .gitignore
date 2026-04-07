@@ -11,3 +11,4 @@ dist/
 checkpoints/
 wandb/
 .ipynb_checkpoints/
+venv/
