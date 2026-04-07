@@ -1,4 +1,4 @@
-import io
+import time
 from dataclasses import dataclass
 from typing import Callable
 
@@ -36,28 +36,22 @@ def build_compression_hook(
         state.compress_time = compress_timer.elapsed
         state.bytes_sent = len(compressed)
 
-        tensor_bytes = torch.frombuffer(
-            bytearray(compressed), dtype=torch.uint8
-        )
-        padded_size = torch.tensor([tensor_bytes.numel()], dtype=torch.long)
-        max_size = torch.zeros(1, dtype=torch.long)
-        dist.all_reduce(padded_size, op=dist.ReduceOp.MAX)
-        max_size[0] = padded_size[0]
+        with Timer() as decompress_timer:
+            decompressed = compressor.decompress(compressed, shape, dtype)
+        state.decompress_time = decompress_timer.elapsed
 
-        padded = torch.zeros(max_size[0].item(), dtype=torch.uint8)
-        padded[: tensor_bytes.numel()] = tensor_bytes
+        decompressed = decompressed.to(buf.device)
 
-        fut = dist.all_reduce(padded, op=dist.ReduceOp.SUM, async_op=True).get_future()
+        fut = dist.all_reduce(
+            decompressed, op=dist.ReduceOp.SUM, async_op=True
+        ).get_future()
 
-        def decompress_and_average(fut: torch.futures.Future) -> torch.Tensor:
-            result_bytes = bytes(fut.value()[0][: state.bytes_sent].tolist())
-            with Timer() as decompress_timer:
-                decompressed = compressor.decompress(result_bytes, shape, dtype)
-            state.decompress_time = decompress_timer.elapsed
-            averaged = decompressed.to(buf.device) / world_size
+        def average(fut: torch.futures.Future) -> torch.Tensor:
+            result = fut.value()[0]
+            averaged = result / world_size
             buf.copy_(averaged)
             return buf
 
-        return fut.then(decompress_and_average)
+        return fut.then(average)
 
     return compression_hook, state
