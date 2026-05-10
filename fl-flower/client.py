@@ -76,15 +76,15 @@ class FlowerClient(fl.client.NumPyClient):
 
         self._train(lr=lr)
 
-        # Flatten full state_dict (params + BN buffers) into float32 vector.
-        # BN running stats must be included so FedAvg aggregates them correctly.
-        state_dict = self.model.state_dict()
-        shapes = [v.shape for v in state_dict.values()]
-        flat = np.concatenate([v.cpu().float().numpy().flatten()
-                               for v in state_dict.values()])
-        tensor = torch.from_numpy(flat.copy())
+        # Compress ONLY trainable parameters (nn.Parameters), not BN buffers.
+        # Including buffers like num_batches_tracked (large int) in the flat
+        # vector would blow up the quantization range and destroy weight fidelity.
+        # BN buffers are returned uncompressed; Flower aggregates the full state_dict.
+        param_flat = np.concatenate([p.detach().cpu().numpy().flatten()
+                                     for p in self.model.parameters()])
+        param_shapes = [p.shape for p in self.model.parameters()]
+        tensor = torch.from_numpy(param_flat.copy())
 
-        # Compress → measure → decompress (applies lossy error to weights)
         t0 = time.perf_counter()
         compressed = self.compressor.compress(tensor)
         compress_time = time.perf_counter() - t0
@@ -95,12 +95,16 @@ class FlowerClient(fl.client.NumPyClient):
         )
         decompress_time = time.perf_counter() - t0
 
-        # Reconstruct List[np.ndarray] from decompressed flat vector
-        params_out = self._unflatten(decompressed.numpy(), shapes)
+        # Reconstruct compressed parameters into model, then return full state_dict
+        compressed_params = self._unflatten(decompressed.numpy(), param_shapes)
+        state = self.model.state_dict()
+        for (name, _), arr in zip(self.model.named_parameters(), compressed_params):
+            state[name] = torch.tensor(arr)
+        params_out = [v.cpu().float().numpy() for v in state.values()]
 
         metrics = {
             "bytes_sent":     float(len(compressed)),
-            "original_bytes": float(flat.nbytes),
+            "original_bytes": float(param_flat.nbytes),
             "compress_time":  compress_time,
             "decompress_time": decompress_time,
         }
