@@ -16,7 +16,7 @@ RESULTS = f"{REPO_DIR}/results"
 
 # ── Install dependencies ──────────────────────────────────────────────────────
 subprocess.run([sys.executable, "-m", "pip", "install", "-q",
-                "flwr[simulation]==1.8.0", "pysz", "pandas", "seaborn"], check=True)
+                "flwr[simulation]==1.8.0", "pandas", "seaborn"], check=True)
 
 # ── Clone repo ────────────────────────────────────────────────────────────────
 if not os.path.exists(REPO_DIR):
