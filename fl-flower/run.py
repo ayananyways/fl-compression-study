@@ -27,6 +27,9 @@ import torch
 import torch.nn as nn
 import flwr as fl
 
+# nnpack crashes on Apple Silicon (Trace/BPT trap: 5); disable it globally
+torch.backends.nnpack.enabled = False
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.dirname(_HERE))
