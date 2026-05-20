@@ -245,15 +245,22 @@ def main() -> None:
         ).to_client()
 
     import torch as _torch
+    import ray as _ray
     _gpu_frac = (1.0 / args.num_clients) if _torch.cuda.is_available() else 0.0
-    fl.simulation.start_simulation(
-        client_fn=client_fn,
-        num_clients=args.num_clients,
-        config=fl.server.ServerConfig(num_rounds=remaining_rounds),
-        strategy=strategy,
-        client_resources={"num_cpus": 1, "num_gpus": _gpu_frac},
-        ray_init_args={"ignore_reinit_error": True, "include_dashboard": False},
-    )
+    try:
+        fl.simulation.start_simulation(
+            client_fn=client_fn,
+            num_clients=args.num_clients,
+            config=fl.server.ServerConfig(num_rounds=remaining_rounds),
+            strategy=strategy,
+            client_resources={"num_cpus": 1, "num_gpus": _gpu_frac},
+            ray_init_args={"ignore_reinit_error": True, "include_dashboard": False},
+        )
+    finally:
+        # Shut Ray down cleanly so the next run starts with a fresh cluster.
+        # Without this, leftover worker processes cause lock timeouts on macOS.
+        if _ray.is_initialized():
+            _ray.shutdown()
 
     print(f"\nDone. Results saved to {args.output}")
 
