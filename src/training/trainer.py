@@ -1,9 +1,11 @@
 import logging
+import os
 import time
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from mpi4py import MPI
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from src.compressors.base import Compressor
@@ -40,6 +42,14 @@ class Trainer:
         self.val_loader = None
         self.hook_state: HookState | None = None
         self._criterion: nn.Module | None = None
+        self.start_round: int = 0
+        self._checkpoint_path: str = self._build_checkpoint_path()
+
+    def _build_checkpoint_path(self) -> str:
+        checkpoint_dir = self.config.get("checkpoint_dir", "./checkpoints")
+        experiment_id = self.config.get("experiment_id", "experiment")
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        return os.path.join(checkpoint_dir, f"{experiment_id}.pt")
 
     def setup(self) -> None:
         set_seed(self.config["seed"] + self.rank)
@@ -89,8 +99,44 @@ class Trainer:
         )
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer,
-            T_max=self.config.get("total_rounds", 50),
+            T_max=self.config.get("total_rounds", 200),
         )
+
+        self._load_checkpoint()
+
+    def save_checkpoint(self, round_num: int) -> None:
+        comm = MPI.COMM_WORLD
+        if self.rank == 0:
+            torch.save(
+                {
+                    "round": round_num,
+                    "model": self.model.module.state_dict(),
+                    "optimizer": self.optimizer.state_dict(),
+                    "scheduler": self.scheduler.state_dict(),
+                },
+                self._checkpoint_path,
+            )
+            logger.debug("Checkpoint saved at round %d → %s", round_num, self._checkpoint_path)
+        comm.Barrier()
+
+    def _load_checkpoint(self) -> None:
+        comm = MPI.COMM_WORLD
+        exists = os.path.isfile(self._checkpoint_path) if self.rank == 0 else False
+        exists = comm.bcast(exists, root=0)
+        if not exists:
+            return
+
+        checkpoint = torch.load(self._checkpoint_path, map_location=self.device)
+        self.model.module.load_state_dict(checkpoint["model"])
+        self.optimizer.load_state_dict(checkpoint["optimizer"])
+        self.scheduler.load_state_dict(checkpoint["scheduler"])
+        self.start_round = checkpoint["round"] + 1
+        if self.rank == 0:
+            logger.info(
+                "Resumed from checkpoint: %s (resuming at round %d)",
+                self._checkpoint_path,
+                self.start_round,
+            )
 
     def train_one_round(self, round_num: int) -> MetricsTracker:
         self.model.train()
@@ -140,12 +186,12 @@ class Trainer:
         val_loss, val_acc = self.evaluate()
         wall_clock = time.perf_counter() - wall_start
 
-        sample_tensor = next(iter(self.model.parameters())).detach().cpu()
         ratio = 1.0
         if bytes_sent > 0:
             try:
-                compressed_sample = self.compressor.compress(sample_tensor.flatten())
-                ratio = self.compressor.compression_ratio(sample_tensor.flatten(), compressed_sample)
+                sample_tensor = next(iter(self.model.parameters())).detach().cpu().flatten()
+                compressed_sample = self.compressor.compress(sample_tensor)
+                ratio = self.compressor.compression_ratio(sample_tensor, compressed_sample)
             except Exception:
                 ratio = 1.0
 

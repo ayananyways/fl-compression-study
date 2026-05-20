@@ -9,24 +9,25 @@ class SZCompressor(Compressor):
     def __init__(self, error_bound: float) -> None:
         self.error_bound = error_bound
         try:
-            import sz as _sz  # noqa: F401
+            import pysz as _pysz  # noqa: F401
         except ImportError:
-            raise ImportError(
-                "pyszz is required for SZCompressor. "
-                "Install it with: pip install pyszz"
-            )
+            raise ImportError("pysz is required for SZCompressor. Install with: pip install pysz")
 
     @property
     def name(self) -> str:
         return f"sz_eb{self.error_bound}"
 
     def compress(self, tensor: torch.Tensor) -> bytes:
-        import sz
-        arr = tensor.float().numpy()
-        compressed = sz.compress(arr, abs_err_bound=self.error_bound)
-        return compressed
+        import pysz
+        arr = np.ascontiguousarray(tensor.float().numpy())
+        cfg = pysz.szConfig()
+        cfg.errorBoundMode = pysz.szErrorBoundMode.ABS
+        cfg.absErrorBound = self.error_bound
+        compressed, _ = pysz.sz.compress(arr, cfg)
+        return compressed.tobytes()
 
     def decompress(self, data: bytes, shape: tuple, dtype: torch.dtype) -> torch.Tensor:
-        import sz
-        arr = sz.decompress(data, np.float32, shape)
-        return torch.from_numpy(arr).to(dtype)
+        import pysz
+        compressed = np.frombuffer(data, dtype=np.uint8)
+        decompressed, _ = pysz.sz.decompress(compressed, np.float32, shape)
+        return torch.from_numpy(decompressed.copy()).to(dtype)

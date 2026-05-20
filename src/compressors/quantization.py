@@ -56,32 +56,34 @@ class QuantizationCompressor(Compressor):
             return quantized.astype(np.uint8).tobytes()
         if self.bits == 16:
             return quantized.astype(np.uint16).tobytes()
-        result = bytearray()
-        buf = 0
-        bits_in_buf = 0
-        for val in quantized:
-            buf = (buf << self.bits) | int(val)
-            bits_in_buf += self.bits
-            while bits_in_buf >= 8:
-                bits_in_buf -= 8
-                result.append((buf >> bits_in_buf) & 0xFF)
-        if bits_in_buf > 0:
-            result.append((buf << (8 - bits_in_buf)) & 0xFF)
-        return bytes(result)
+        if self.bits == 1:
+            return np.packbits(quantized.astype(np.uint8)).tobytes()
+        # 2-bit: pack 4 values per byte
+        # 4-bit: pack 2 values per byte
+        vals_per_byte = 8 // self.bits
+        n = len(quantized)
+        pad = (-n) % vals_per_byte
+        padded = np.zeros(n + pad, dtype=np.uint8)
+        padded[:n] = quantized.astype(np.uint8)
+        grouped = padded.reshape(-1, vals_per_byte)
+        packed = np.zeros(len(grouped), dtype=np.uint8)
+        for i in range(vals_per_byte):
+            packed |= (grouped[:, i] << (8 - self.bits * (i + 1)))
+        return packed.tobytes()
 
     def _unpack_bits(self, data: bytes, n_elements: int) -> np.ndarray:
         if self.bits == 8:
             return np.frombuffer(data, dtype=np.uint8)[:n_elements].astype(np.uint32)
         if self.bits == 16:
             return np.frombuffer(data, dtype=np.uint16)[:n_elements].astype(np.uint32)
-        mask = (1 << self.bits) - 1
-        result = []
-        buf = 0
-        bits_in_buf = 0
-        for byte in data:
-            buf = (buf << 8) | byte
-            bits_in_buf += 8
-            while bits_in_buf >= self.bits and len(result) < n_elements:
-                bits_in_buf -= self.bits
-                result.append((buf >> bits_in_buf) & mask)
-        return np.array(result[:n_elements], dtype=np.uint32)
+        if self.bits == 1:
+            return np.unpackbits(np.frombuffer(data, dtype=np.uint8))[:n_elements].astype(np.uint32)
+        # 2-bit: unpack 4 values per byte
+        # 4-bit: unpack 2 values per byte
+        vals_per_byte = 8 // self.bits
+        mask = np.uint8((1 << self.bits) - 1)
+        packed = np.frombuffer(data, dtype=np.uint8)
+        grouped = np.zeros((len(packed), vals_per_byte), dtype=np.uint8)
+        for i in range(vals_per_byte):
+            grouped[:, i] = (packed >> (8 - self.bits * (i + 1))) & mask
+        return grouped.reshape(-1)[:n_elements].astype(np.uint32)

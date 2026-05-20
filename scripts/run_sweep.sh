@@ -21,9 +21,8 @@ for config in "${CONFIGS[@]}"; do
     echo "---" | tee -a "$LOG_FILE"
     echo "Starting: $config at $(date)" | tee -a "$LOG_FILE"
 
-    torchrun \
-        --nproc_per_node="$NPROC" \
-        "$SCRIPT_DIR/train.py" \
+    mpirun -n "$NPROC" \
+        python "$SCRIPT_DIR/train.py" \
         --config "$full_config" \
         2>&1 | tee -a "$LOG_FILE"
 

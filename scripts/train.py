@@ -4,6 +4,7 @@ import os
 import sys
 
 import yaml
+from mpi4py import MPI
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -55,8 +56,9 @@ def main() -> None:
     parser.add_argument("--config", required=True, help="Path to experiment config YAML")
     args = parser.parse_args()
 
-    rank = int(os.environ.get("RANK", 0))
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    world_size = comm.Get_size()
 
     config = _load_config(args.config)
     config["rank"] = rank
@@ -74,30 +76,35 @@ def main() -> None:
 
     try:
         trainer.setup()
-        total_rounds = config.get("total_rounds", 50)
+        total_rounds = config.get("total_rounds", 200)
 
-        for round_num in range(total_rounds):
-            metrics = trainer.train_one_round(round_num)
-
+        if trainer.start_round >= total_rounds:
             if is_main_process(rank):
-                results_logger.log(metrics)
-                logger.info(
-                    "Round %d/%d — loss=%.4f val_loss=%.4f val_acc=%.4f "
-                    "compress=%.3fs decompress=%.3fs bytes=%d ratio=%.2f",
-                    round_num + 1,
-                    total_rounds,
-                    metrics.train_loss,
-                    metrics.val_loss,
-                    metrics.val_accuracy,
-                    metrics.compress_time_s,
-                    metrics.decompress_time_s,
-                    metrics.bytes_sent,
-                    metrics.compression_ratio,
-                )
+                logger.info("Training already complete (%d/%d rounds).", trainer.start_round, total_rounds)
+        else:
+            for round_num in range(trainer.start_round, total_rounds):
+                metrics = trainer.train_one_round(round_num)
+                trainer.save_checkpoint(round_num)
+
+                if is_main_process(rank):
+                    results_logger.log(metrics)
+                    logger.info(
+                        "Round %d/%d — loss=%.4f val_loss=%.4f val_acc=%.4f "
+                        "compress=%.3fs decompress=%.3fs bytes=%d ratio=%.2f",
+                        round_num + 1,
+                        total_rounds,
+                        metrics.train_loss,
+                        metrics.val_loss,
+                        metrics.val_accuracy,
+                        metrics.compress_time_s,
+                        metrics.decompress_time_s,
+                        metrics.bytes_sent,
+                        metrics.compression_ratio,
+                    )
 
     except KeyboardInterrupt:
         if is_main_process(rank):
-            logger.info("Training interrupted by user.")
+            logger.info("Training interrupted — checkpoint saved through round %d.", trainer.start_round - 1)
     finally:
         trainer.cleanup()
 
