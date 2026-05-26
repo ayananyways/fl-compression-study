@@ -38,6 +38,7 @@ from src.compressors.base import Compressor
 from src.compressors.no_compression import NoCompression
 from src.compressors.quantization import QuantizationCompressor
 from src.compressors.sz import SZCompressor
+from src.compressors.sz_usnr import SZUsnrRmsCompressor
 
 from models import build_model, get_parameters, set_parameters
 from data import load_datasets
@@ -51,7 +52,7 @@ from adaptive_strategy import AdaptiveSZStrategy
 def _parse() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="FL compression study with Flower")
     p.add_argument("--dataset",      choices=["cifar10", "cifar100"], default="cifar10")
-    p.add_argument("--compressor",   choices=["none", "quantization", "sz"], default="none")
+    p.add_argument("--compressor",   choices=["none", "quantization", "sz", "sz_usnr_rms"], default="none")
     p.add_argument("--bits",         type=int,   default=8, choices=[1, 2, 4, 8, 16])
     p.add_argument("--error-bound",  type=float, default=0.01)
     p.add_argument("--num-clients",  type=int,   default=10)
@@ -67,6 +68,15 @@ def _parse() -> argparse.Namespace:
                    help="Adaptive SZ error-bound schedule (implies --compressor sz)")
     p.add_argument("--seed",         type=int, default=0,
                    help="Random seed for data partition and model initialisation")
+    # USNR-SZ options
+    p.add_argument("--usnr-alpha",   type=float, default=0.1,
+                   help="USNR-RMS alpha: eb = clip(alpha*rms, eb_min, eb_max)")
+    p.add_argument("--usnr-eb-min",  type=float, default=1e-6,
+                   help="USNR-RMS minimum error bound")
+    p.add_argument("--usnr-eb-max",  type=float, default=1.0,
+                   help="USNR-RMS maximum error bound")
+    p.add_argument("--usnr-diagnostics", action="store_true",
+                   help="Write per-tensor diagnostics CSV (smoke tests only)")
     return p.parse_args()
 
 
@@ -79,12 +89,21 @@ def _build_compressor(args: argparse.Namespace) -> Compressor:
         return QuantizationCompressor(bits=args.bits)
     if args.compressor == "sz":
         return SZCompressor(error_bound=args.error_bound)
+    if args.compressor == "sz_usnr_rms":
+        return SZUsnrRmsCompressor(
+            alpha=args.usnr_alpha,
+            eb_min=args.usnr_eb_min,
+            eb_max=args.usnr_eb_max,
+            diagnostics=args.usnr_diagnostics,
+        )
     raise ValueError(args.compressor)
 
 
 def _run_name(args: argparse.Namespace, compressor: Compressor) -> str:
     if args.schedule is not None:
         name = f"sz_schedule_{args.schedule.lower()}"
+    elif args.compressor == "sz_usnr_rms":
+        name = f"sz_usnr_rms_a{args.usnr_alpha}"
     else:
         name = compressor.name
     if args.lr_decay:
@@ -204,6 +223,11 @@ def main() -> None:
 
     strategy_holder = [None]
 
+    diag_path = None
+    if getattr(args, "usnr_diagnostics", False):
+        diag_stem = os.path.splitext(args.output)[0]
+        diag_path = f"{diag_stem}_diag_{run_name}_s{args.seed}.csv"
+
     strategy_kwargs = dict(
         output_path=args.output,
         compressor_name=run_name,
@@ -213,6 +237,7 @@ def main() -> None:
         round_offset=start_round,
         lr_decay=args.lr_decay,
         seed=args.seed,
+        diagnostics_path=diag_path,
         fraction_fit=1.0,
         fraction_evaluate=0.0,
         min_fit_clients=args.num_clients,

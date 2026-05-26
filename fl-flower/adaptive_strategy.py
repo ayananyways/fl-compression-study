@@ -38,6 +38,7 @@ class AdaptiveSZStrategy(LoggingFedAvg):
         self.schedule = schedule
         self.current_eb: float = _EB_LEVELS[0]
         self.recent_accuracies: List[float] = []
+        self._last_step_round: int = -1  # round when eb last stepped up
 
     # ── Config injection (called every round before clients train) ────────────
 
@@ -60,15 +61,24 @@ class AdaptiveSZStrategy(LoggingFedAvg):
                 self.current_eb = 0.01
 
         elif self.schedule == "C":
-            if len(self.recent_accuracies) >= 5:
-                gain = self.recent_accuracies[-1] - self.recent_accuracies[-5]
-                if gain < 0.5 and self.current_eb < _EB_LEVELS[-1]:
+            # 10-round window, 1.0% threshold, 15-round cooldown between steps.
+            # - 10-round window: active convergence gains are typically 2-10%,
+            #   so noise that looks like a plateau over 5 rounds won't fool this.
+            # - 15-round cooldown: gives the model time to adapt to the new
+            #   error bound before we evaluate the next plateau, preventing
+            #   cascading triggers.
+            # None of these numbers depend on knowing when the plateau occurs.
+            rounds_since_step = server_round - self._last_step_round
+            if len(self.recent_accuracies) >= 10 and rounds_since_step >= 15:
+                gain = self.recent_accuracies[-1] - self.recent_accuracies[-10]
+                if gain < 1.0 and self.current_eb < _EB_LEVELS[-1]:
                     idx = _EB_LEVELS.index(self.current_eb)
                     old_eb = self.current_eb
                     self.current_eb = _EB_LEVELS[idx + 1]
+                    self._last_step_round = server_round
                     print(
                         f"  [AdaptiveSZ-C] round {server_round}: plateau "
-                        f"(5-round gain={gain:.2f}%) → eb {old_eb} → {self.current_eb}"
+                        f"(10-round gain={gain:.2f}%) → eb {old_eb} → {self.current_eb}"
                     )
 
     # ── Track accuracy for Schedule C plateau detection ───────────────────────

@@ -15,6 +15,16 @@ _CSV_COLUMNS = [
     "val_accuracy", "val_loss",
     "bytes_sent", "compression_ratio",
     "compress_time_s", "decompress_time_s",
+    # USNR-only fields (NaN for other compressors)
+    "usnr_alpha",
+    "usnr_eb_mean", "usnr_eb_min", "usnr_eb_max",
+    "usnr_rms_mean", "usnr_rms_min", "usnr_rms_max",
+    "compressed_tensors_count", "uncompressed_tensors_count",
+]
+
+_USNR_DIAG_COLUMNS = [
+    "round", "client_id", "tensor_idx", "shape", "ndim",
+    "original_bytes", "compressed_bytes", "ratio", "rms", "eb",
 ]
 
 
@@ -39,17 +49,19 @@ class LoggingFedAvg(fl.server.strategy.FedAvg):
         round_offset: int = 0,
         lr_decay: bool = False,
         seed: int = 0,
+        diagnostics_path: Optional[str] = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
-        self.output_path = output_path
-        self.compressor_name = compressor_name
-        self.num_clients = num_clients
-        self.alpha = alpha
-        self.checkpoint_dir = checkpoint_dir
-        self.round_offset = round_offset
-        self.lr_decay = lr_decay
-        self.seed = seed
+        self.output_path      = output_path
+        self.compressor_name  = compressor_name
+        self.num_clients      = num_clients
+        self.alpha            = alpha
+        self.checkpoint_dir   = checkpoint_dir
+        self.round_offset     = round_offset
+        self.lr_decay         = lr_decay
+        self.seed             = seed
+        self.diagnostics_path = diagnostics_path
 
         self.round_fit_metrics: Dict[int, Dict] = {}
 
@@ -59,6 +71,10 @@ class LoggingFedAvg(fl.server.strategy.FedAvg):
         if not os.path.exists(output_path):
             with open(output_path, "w", newline="") as f:
                 csv.DictWriter(f, fieldnames=self._csv_columns).writeheader()
+
+        if diagnostics_path and not os.path.exists(diagnostics_path):
+            with open(diagnostics_path, "w", newline="") as f:
+                csv.DictWriter(f, fieldnames=_USNR_DIAG_COLUMNS).writeheader()
 
     # ── Config injection ──────────────────────────────────────────────────────
 
@@ -85,18 +101,51 @@ class LoggingFedAvg(fl.server.strategy.FedAvg):
         aggregated = super().aggregate_fit(server_round, results, failures)
 
         if results:
-            total_bytes    = sum(r.metrics.get("bytes_sent", 0)     for _, r in results)
-            orig_bytes     = sum(r.metrics.get("original_bytes", 0)  for _, r in results)
-            avg_compress   = float(np.mean([r.metrics.get("compress_time", 0)    for _, r in results]))
-            avg_decompress = float(np.mean([r.metrics.get("decompress_time", 0)  for _, r in results]))
+            total_bytes    = sum(r.metrics.get("bytes_sent", 0)      for _, r in results)
+            orig_bytes     = sum(r.metrics.get("original_bytes", 0)   for _, r in results)
+            avg_compress   = float(np.mean([r.metrics.get("compress_time",   0) for _, r in results]))
+            avg_decompress = float(np.mean([r.metrics.get("decompress_time", 0) for _, r in results]))
             ratio = orig_bytes / total_bytes if total_bytes > 0 else 1.0
+
+            # USNR aggregate metrics (mean across clients; nan for non-USNR rounds)
+            def _mean_metric(key):
+                vals = [r.metrics[key] for _, r in results if key in r.metrics]
+                return float(np.nanmean(vals)) if vals else float("nan")
+
+            usnr_fields = {
+                "usnr_alpha":               _mean_metric("usnr_alpha"),
+                "usnr_eb_mean":             _mean_metric("usnr_eb_mean"),
+                "usnr_eb_min":              _mean_metric("usnr_eb_min"),
+                "usnr_eb_max":              _mean_metric("usnr_eb_max"),
+                "usnr_rms_mean":            _mean_metric("usnr_rms_mean"),
+                "usnr_rms_min":             _mean_metric("usnr_rms_min"),
+                "usnr_rms_max":             _mean_metric("usnr_rms_max"),
+                "compressed_tensors_count":   _mean_metric("compressed_tensors_count"),
+                "uncompressed_tensors_count": _mean_metric("uncompressed_tensors_count"),
+            }
 
             self.round_fit_metrics[server_round] = {
                 "bytes_sent":        total_bytes,
                 "compression_ratio": ratio,
                 "compress_time_s":   avg_compress,
                 "decompress_time_s": avg_decompress,
+                **usnr_fields,
             }
+
+            # Write per-tensor diagnostics from the first client that sent them
+            if self.diagnostics_path:
+                actual_round = server_round + self.round_offset
+                for client_idx, (_, r) in enumerate(results):
+                    diag_bytes = r.metrics.get("_usnr_diag")
+                    if diag_bytes:
+                        rows = pickle.loads(diag_bytes)
+                        with open(self.diagnostics_path, "a", newline="") as f:
+                            w = csv.DictWriter(f, fieldnames=_USNR_DIAG_COLUMNS,
+                                               extrasaction="ignore")
+                            for row in rows:
+                                w.writerow({"round": actual_round,
+                                            "client_id": client_idx, **row})
+                        break  # first client is sufficient for architecture-level info
 
         if aggregated is not None:
             params, _ = aggregated
@@ -115,6 +164,7 @@ class LoggingFedAvg(fl.server.strategy.FedAvg):
     def log_round(self, server_round: int, val_accuracy: float, val_loss: float) -> None:
         actual_round = server_round + self.round_offset
         m = self.round_fit_metrics.get(server_round, {})
+        nan = float("nan")
         row = {
             "timestamp":         datetime.now(timezone.utc).isoformat(),
             "round":             actual_round,
@@ -128,6 +178,15 @@ class LoggingFedAvg(fl.server.strategy.FedAvg):
             "compression_ratio": m.get("compression_ratio", 1.0),
             "compress_time_s":   m.get("compress_time_s", 0.0),
             "decompress_time_s": m.get("decompress_time_s", 0.0),
+            "usnr_alpha":               m.get("usnr_alpha", nan),
+            "usnr_eb_mean":             m.get("usnr_eb_mean", nan),
+            "usnr_eb_min":              m.get("usnr_eb_min", nan),
+            "usnr_eb_max":              m.get("usnr_eb_max", nan),
+            "usnr_rms_mean":            m.get("usnr_rms_mean", nan),
+            "usnr_rms_min":             m.get("usnr_rms_min", nan),
+            "usnr_rms_max":             m.get("usnr_rms_max", nan),
+            "compressed_tensors_count":   m.get("compressed_tensors_count", nan),
+            "uncompressed_tensors_count": m.get("uncompressed_tensors_count", nan),
         }
         with open(self.output_path, "a", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=self._csv_columns, extrasaction="ignore")

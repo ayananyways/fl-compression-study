@@ -10,6 +10,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.dirname(_HERE))
 from src.compressors.base import Compressor
+from src.compressors.sz_usnr import SZUsnrRmsCompressor
 from models import get_parameters, set_parameters
 
 
@@ -74,6 +75,48 @@ class FlowerClient(fl.client.NumPyClient):
         if eb is not None and hasattr(self.compressor, "error_bound"):
             self.compressor.error_bound = float(eb)
 
+        if isinstance(self.compressor, SZUsnrRmsCompressor):
+            return self._fit_usnr(lr)
+        return self._fit_flat(lr)
+
+    # ── USNR path ─────────────────────────────────────────────────────────────
+
+    def _fit_usnr(self, lr: float) -> Tuple[List[np.ndarray], int, Dict]:
+        """Per-tensor compression with delta-derived error bounds."""
+        global_param_tensors = [p.detach().clone().cpu() for p in self.model.parameters()]
+
+        self._train(lr=lr)
+
+        local_param_tensors = [p.detach().cpu() for p in self.model.parameters()]
+        param_shapes = [p.shape for p in self.model.parameters()]
+
+        t0 = time.perf_counter()
+        payload, usnr_metrics = self.compressor.compress_tensors(
+            local_param_tensors, global_param_tensors
+        )
+        compress_time = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        decompressed_tensors = self.compressor.decompress_tensors(payload, param_shapes)
+        decompress_time = time.perf_counter() - t0
+
+        # Write compressed params back into full state_dict (BN buffers pass through)
+        state = self.model.state_dict()
+        for (name, _), tensor in zip(self.model.named_parameters(), decompressed_tensors):
+            state[name] = tensor
+        params_out = [v.cpu().float().numpy() for v in state.values()]
+
+        metrics = {
+            **usnr_metrics,
+            "compress_time":   compress_time,
+            "decompress_time": decompress_time,
+        }
+        return params_out, len(self.trainloader.dataset), metrics
+
+    # ── Existing flat-vector path ──────────────────────────────────────────────
+
+    def _fit_flat(self, lr: float) -> Tuple[List[np.ndarray], int, Dict]:
+        """Original flat-vector compress/decompress (quantization, fixed-SZ, none)."""
         self._train(lr=lr)
 
         # Compress ONLY trainable parameters (nn.Parameters), not BN buffers.
@@ -95,7 +138,6 @@ class FlowerClient(fl.client.NumPyClient):
         )
         decompress_time = time.perf_counter() - t0
 
-        # Reconstruct compressed parameters into model, then return full state_dict
         compressed_params = self._unflatten(decompressed.numpy(), param_shapes)
         state = self.model.state_dict()
         for (name, _), arr in zip(self.model.named_parameters(), compressed_params):
@@ -103,9 +145,9 @@ class FlowerClient(fl.client.NumPyClient):
         params_out = [v.cpu().float().numpy() for v in state.values()]
 
         metrics = {
-            "bytes_sent":     float(len(compressed)),
-            "original_bytes": float(param_flat.nbytes),
-            "compress_time":  compress_time,
+            "bytes_sent":      float(len(compressed)),
+            "original_bytes":  float(param_flat.nbytes),
+            "compress_time":   compress_time,
             "decompress_time": decompress_time,
         }
         return params_out, len(self.trainloader.dataset), metrics
