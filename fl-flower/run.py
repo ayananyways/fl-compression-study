@@ -39,6 +39,7 @@ from src.compressors.no_compression import NoCompression
 from src.compressors.quantization import QuantizationCompressor
 from src.compressors.sz import SZCompressor, SZRelCompressor
 from src.compressors.sz_usnr import SZUsnrRmsCompressor
+from src.compressors.hybrid import HybridCompressor
 
 from models import build_model, get_parameters, set_parameters
 from data import load_datasets
@@ -52,7 +53,7 @@ from adaptive_strategy import AdaptiveSZStrategy
 def _parse() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="FL compression study with Flower")
     p.add_argument("--dataset",      choices=["cifar10", "cifar100"], default="cifar10")
-    p.add_argument("--compressor",   choices=["none", "quantization", "sz", "sz_rel", "sz_usnr_rms"], default="none")
+    p.add_argument("--compressor",   choices=["none", "quantization", "sz", "sz_rel", "sz_usnr_rms", "hybrid"], default="none")
     p.add_argument("--bits",         type=int,   default=8, choices=[1, 2, 4, 8, 16])
     p.add_argument("--error-bound",  type=float, default=0.01)
     p.add_argument("--num-clients",  type=int,   default=10)
@@ -97,6 +98,11 @@ def _build_compressor(args: argparse.Namespace) -> Compressor:
             eb_min=args.usnr_eb_min,
             eb_max=args.usnr_eb_max,
             diagnostics=args.usnr_diagnostics,
+        )
+    if args.compressor == "hybrid":
+        return HybridCompressor(
+            sz_error_bound=args.error_bound,
+            quant_bits=args.bits,
         )
     raise ValueError(args.compressor)
 
