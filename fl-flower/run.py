@@ -37,7 +37,7 @@ sys.path.insert(0, os.path.dirname(_HERE))
 from src.compressors.base import Compressor
 from src.compressors.no_compression import NoCompression
 from src.compressors.quantization import QuantizationCompressor
-from src.compressors.sz import SZCompressor
+from src.compressors.sz import SZCompressor, SZRelCompressor
 from src.compressors.sz_usnr import SZUsnrRmsCompressor
 
 from models import build_model, get_parameters, set_parameters
@@ -52,7 +52,7 @@ from adaptive_strategy import AdaptiveSZStrategy
 def _parse() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="FL compression study with Flower")
     p.add_argument("--dataset",      choices=["cifar10", "cifar100"], default="cifar10")
-    p.add_argument("--compressor",   choices=["none", "quantization", "sz", "sz_usnr_rms"], default="none")
+    p.add_argument("--compressor",   choices=["none", "quantization", "sz", "sz_rel", "sz_usnr_rms"], default="none")
     p.add_argument("--bits",         type=int,   default=8, choices=[1, 2, 4, 8, 16])
     p.add_argument("--error-bound",  type=float, default=0.01)
     p.add_argument("--num-clients",  type=int,   default=10)
@@ -89,6 +89,8 @@ def _build_compressor(args: argparse.Namespace) -> Compressor:
         return QuantizationCompressor(bits=args.bits)
     if args.compressor == "sz":
         return SZCompressor(error_bound=args.error_bound)
+    if args.compressor == "sz_rel":
+        return SZRelCompressor(error_bound=args.error_bound)
     if args.compressor == "sz_usnr_rms":
         return SZUsnrRmsCompressor(
             alpha=args.usnr_alpha,
